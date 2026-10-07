@@ -107,3 +107,49 @@ make가 에러와 경고 없이 끝났고, 11개 트레이스가 모두 통과�
 | `copySize-DSIZE;` → `statement with no effect` 경고 | 계산만 하고 결과를 버리는 줄이었다. `copySize = copySize - DSIZE;`처럼 다시 대입해야 한다 |
 | `HDRP`를 괄호 없이 쓰고, `SIZE_T_SIZE(HDRP)`처럼 숫자를 함수처럼 부름 | `HDRP(bp)`는 블록을 괄호 안에 넣어야 하는 매크로다 |
 | `GET_SIZE(HDRP(bp))` 앞에 예전 포인터 계산이 남아 괄호가 안 닫힘, `bp` 변수도 없음 | 예전 방식을 통째로 지우고 `mm_free` 첫 줄과 같은 모양으로, 이 함수의 변수 `ptr`을 넣었다 |
+
+### 완성한 함수 (추가)
+- #21 find_fit을 next fit 방식으로 변경 (전역 변수 `find_heap`, `mm_init`, `find_fit`, `coalesce` 수정)
+
+### mdriver 결과 (next fit 적용 후)
+make가 에러와 경고 없이 끝났고, 11개 트레이스가 모두 통과했다.
+
+| 번호 | 트레이스 | valid | util | Kops |
+| --- | --- | --- | --- | --- |
+| 0 | amptjp | yes | 91% | 2407 |
+| 1 | cccp | yes | 92% | 3344 |
+| 2 | cp-decl | yes | 95% | 1560 |
+| 3 | expr | yes | 97% | 924 |
+| 4 | coalescing | yes | 66% | 113654 |
+| 5 | random | yes | 91% | 791 |
+| 6 | random2 | yes | 89% | 890 |
+| 7 | binary | yes | 55% | 480 |
+| 8 | binary2 | yes | 51% | 1441 |
+| 9 | realloc | yes | 27% | 98 |
+| 10 | realloc2 | yes | 45% | 3555 |
+| 합계 | | | 73% | 513 |
+
+- Perf index = 44 (util) + 34 (thru) = 78/100 (세 번 돌린 결과: 78, 74, 76. thru가 30~34점 사이에서 달라진다)
+- short1-bal.rep : 40 (util) + 40 (thru) = 80/100
+- short2-bal.rep : 54 (util) + 40 (thru) = 94/100
+
+### 전후 비교 (first fit → next fit)
+| | first fit | next fit |
+| --- | --- | --- |
+| util 점수 | 44 | 44 |
+| thru 점수 | 8 | 30~34 |
+| Perf index | 53/100 | 74~78/100 |
+| 전체 util | 74% | 73% |
+| 전체 처리량 | 125 Kops | 513 Kops |
+
+### 막혔던 점과 해결 방법 (next fit)
+시도별 코드는 ATTEMPTS.md에 있다.
+
+| 막혔던 점 | 해결 방법 |
+| --- | --- |
+| 위치를 기억시키려고 `PUT(find_heap, 0)`을 씀 | `PUT`은 힙 안에 값을 쓰는 도구다. 변수에 기억시킬 때는 `find_heap = heap_listp;`처럼 `=`를 쓴다 |
+| `find_heap(bp)`, `heap_listp(bp)`처럼 변수에 괄호를 붙임 | 괄호는 함수와 매크로에만 붙인다. 변수는 이름만 쓴다 |
+| 멈춘 자리부터 끝까지만 찾아서 `Ran out of memory` | 못 찾으면 첫 칸부터 `find_heap` 직전까지 한 번 더 찾는 두 번째 for 문을 추가했다 |
+| 두 번째 for 문 조건에서 크기와 주소를 비교 (`GET_SIZE(...) < find_heap`) → 무한 반복 | 위치는 위치와 비교한다: `bp < find_heap` |
+| `Payload overlaps another payload`, segmentation fault | coalesce로 합쳐진 칸의 한가운데를 `find_heap`이 가리키고 있었다. 합친 뒤 `find_heap`이 그 칸 안쪽에 있으면 칸의 시작(`bp`)으로 옮긴다 |
+| coalesce의 if 조건에서 부등호 방향이 반대 | 숫자를 넣어 확인했다 (bp=100, find_heap=150, 다음 칸=200) |
