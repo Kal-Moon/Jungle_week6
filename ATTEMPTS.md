@@ -385,3 +385,449 @@ for (bp = heap_listp; bp < find_heap; bp = NEXT_BLKP(bp)) {
 - 효율: 0~3, 5, 6번 트레이스의 util이 1~8%p 내려갔다(빈칸을 앞에서부터 채우지 않아 조각이 퍼짐). 평균은 74% → 73%로 util 점수는 44점 그대로다.
 - 9번(realloc)은 여전히 느리고(98 Kops) util도 27%다. thru가 40점 만점에 못 미치는 주된 이유다.
 - Kops는 실행할 때마다 달라진다.
+
+## 5. 명시적 가용 리스트 (#22) — 작업 중
+
+`mm.c`(implicit + next fit, 커밋 9d07c80)를 `mm-explicit.c`로 복제해 따로 구현한다. 줄 번호는 `mm-explicit.c` 기준이다.
+시작 점수: `mm.c`와 같은 코드라 44 (util) + 30~34 (thru) = 74~78/100.
+
+설계 메모 (구현 전에 정리한 것)
+- 빈칸끼리만 따로 줄을 세운다. 각 빈칸은 데이터 영역에 "앞 빈칸 주소"(bp 자리)와 "뒤 빈칸 주소"(bp + 4)를 적어 둔다.
+- 처음 생각: 앞 빈칸은 풋터, 뒤 빈칸은 다음 헤더로 찾으면 된다 → 그건 바로 옆 칸을 찾는 방법(implicit)이다. 다음 빈칸은 멀리 떨어져 있을 수 있어 주소를 직접 적어야 한다.
+- 처음 생각: 최소 블록이 24바이트는 되어야 한다 → 32비트에서는 주소가 4바이트라 헤더 4 + 앞 4 + 뒤 4 + 풋터 4 = 16으로 그대로다. 24는 64비트일 때다.
+- 처음 생각: pred, succ를 find_fit의 지역 변수로 선언한다 → 변수가 아니라 빈칸마다 힙 안에 적혀 있는 값이다. 헤더처럼 매크로로 자리를 찾는다.
+- 줄이 바뀌는 곳: 넣기는 mm_free, extend_heap, place(쪼개고 남은 부분), 빼기는 place(할당), coalesce(합칠 때).
+
+### 5-1. 앞/뒤 빈칸 주소 매크로
+
+#### 시도 1 — PREV_BLKP, NEXT_BLKP 모양을 따라 함
+```c
+#define pred(bp)    ((char *)(bp)) - GET_SIZE(((char *)(bp) - PREV_BLKP))
+#define sicc(bp)    ((char *)(bp)) + GET_SIZE(((char *)(bp) + NEXT_BLKP))
+```
+- 결과: 컴파일 에러·경고 없음, 11/11 통과, 44 (util) + 25 (thru) = 69/100. 다만 이 매크로를 아직 아무 데서도 쓰지 않아서 검사되지 않은 것이다. 매크로는 쓰이는 순간에야 컴파일된다.
+- 문제 1: `PREV_BLKP`, `NEXT_BLKP`는 `PREV_BLKP(bp)`처럼 괄호 안에 칸을 넣어야 하는 매크로다. 쓰는 순간 에러가 난다.
+- 문제 2: `GET_SIZE`로 크기를 읽어 그만큼 건너뛰는 것은 "바로 옆 칸"으로 가는 계산이다. 여기서 필요한 것은 같은 칸 안에서 주소가 적힌 자리(bp, bp + 4)다. 크기는 필요 없다.
+- 사소한 점: `sicc`는 succ(successor)의 오타로 보인다.
+
+#### 시도 2 — HDRP, FTRP를 빼고 더함
+```c
+#define pred(bp)    ((char *)(bp)) - HDRP(bp)
+#define sicc(bp)    ((char *)(bp)) + FTRP(bp)
+```
+- 결과: 컴파일 에러·경고 없음, 11/11 통과 (44 util + 10 thru = 54/100, thru는 측정 오차). 여전히 매크로를 쓰는 곳이 없어 검사되지 않은 상태.
+- 나아진 점: `GET_SIZE`와 옆 칸 매크로를 뺐고, 괄호 안에 `bp`를 넣었다.
+- 문제: `HDRP(bp)`, `FTRP(bp)`는 "거리"가 아니라 그 자체로 "위치(주소)"다. 위치에서 위치를 빼면 두 지점 사이의 거리(숫자)가 나오고, 위치에 위치를 더하는 것은 C에서 허용되지 않는다. 필요한 것은 bp에서 고정된 거리(0, WSIZE)만큼 떨어진 자리다.
+- 여기서 답을 안내받음:
+```c
+#define PRED(bp)    ((char *)(bp))
+#define SUCC(bp)    ((char *)(bp) + WSIZE)
+```
+
+#### 시도 3 — 완성 (답을 반영)
+```c
+#define PRED(bp)    ((char *)(bp))
+#define SUCC(bp)    ((char *)(bp) + WSIZE)
+```
+- 결과: 아래 5-2와 함께 확인. 에러·경고 없음.
+
+### 5-2. 줄의 맨 앞을 기억하는 전역 변수
+
+#### 시도 1 — 한 번에 완성
+```c
+static char *free_listp;
+...
+    free_listp = NULL;      /* mm_init 안, extend_heap을 부르기 전 */
+```
+- 결과: 에러·경고 없음, 11/11 통과, 44 (util) + 29 (thru) = 73/100. 아직 매크로와 변수를 쓰는 곳이 없어 동작은 next fit 그대로다.
+- 정한 것: 이름은 `heap_listp`와 짝을 맞춰 `free_listp`. 처음 값은 "빈칸이 하나도 없다"는 뜻의 `NULL`. extend_heap이 첫 빈칸을 줄에 넣게 되므로 그 전에 초기화한다.
+
+### 5-3. "줄에 넣기" 함수 (insert_free)
+
+구현 전 생각 (질문에 대한 처음 답 → 결론)
+- bp의 "뒤" 자리에 적을 값: `SUCC` → 그건 자리 이름이다. 적을 값은 원래 맨 앞이던 칸의 위치(`free_listp`).
+- bp의 "앞" 자리에 적을 값: `PRED+WSIZE` → 맨 앞이라 앞에 아무도 없으니 `NULL`.
+- free_listp의 새 값: 빈 리스트 → 넣은 뒤에는 `bp`가 맨 앞이다.
+- 줄이 비어 있을 때: `continue`로 지나간다 → `continue`는 반복문 안에서만 쓴다. "있을 때만 한다"는 `if`다.
+- 배운 점: 자리(`SUCC(bp)`)와 그 자리에 적는 값은 다르다.
+
+#### 시도 1 — 요청해서 코드를 안내받음
+```c
+static void insert_free(void *bp);      /* 원형 */
+
+static void insert_free(void *bp)
+{
+    PUT(SUCC(bp), (unsigned int)free_listp);
+    PUT(PRED(bp), (unsigned int)NULL);
+    if (free_listp != NULL) {
+        PUT(PRED(free_listp), (unsigned int)bp);
+    }
+    free_listp = bp;
+}
+```
+- 이 함수는 직접 쓰지 않고 안내받은 코드를 넣었다.
+- 순서가 중요하다: `free_listp = bp;`가 마지막이어야 원래 맨 앞 칸의 위치를 잃지 않는다.
+
+### 5-4. "줄에서 빼기"
+
+#### 시도 1 — insert_free 안에 이어서 씀
+```c
+    free_listp = bp;
+
+    if (PRED(bp) < bp; bp < SUCC(bp)){
+        PUT(PRED(bp) + SUCC(bp));
+    }
+}
+```
+- 결과: 컴파일 에러 (`macro "PUT" requires 2 arguments, but only 1 given` 등, 253~254번째 줄). 실행 파일이 만들어지지 않음.
+- 문제 1: 빼기는 넣기와 반대되는 일이라 별도의 함수여야 한다. insert_free 안에 두면 넣자마자 빼게 된다.
+- 문제 2: `if`의 괄호 안에는 조건 하나만 들어간다. 세미콜론으로 나누는 것은 `for`다. 두 조건을 잇는 것은 `&&`다.
+- 문제 3: `PUT`은 `PUT(자리, 값)` 두 개가 필요하다. `PRED(bp) + SUCC(bp)`는 자리 두 개를 더한 것이라 뜻이 없다.
+- 문제 4: `PRED(bp) < bp`는 자리끼리의 비교다(`PRED(bp)`는 bp와 같은 주소). 앞 칸이 있는지 알려면 그 자리에 적힌 값을 `GET`으로 읽어 `NULL`과 비교해야 한다.
+
+#### 시도 2 — 별도 함수로 분리, 앞쪽 조건만 시도
+```c
+static void remove_free(void *bp)
+{
+     if ((char *)PRED < bp) {
+        PUT(PRED(bp) = free_listp
+    }
+}
+```
+- 결과: 컴파일 에러 (`'PUT' undeclared`, `expected ';' at end of input` 등, 257~258번째 줄). 실행 파일이 만들어지지 않음.
+- 나아진 점: `insert_free`에서 꺼내 별도 함수 `remove_free`로 만들었다. 한 번에 하나(앞쪽)만 시도한 것도 좋은 접근이다.
+- 문제 1: `PRED`를 괄호 없이 썼다. `PRED(bp)`처럼 칸을 넣어야 한다.
+- 문제 2: 조건이 위치의 크기 비교(`<`)다. 알고 싶은 것은 "앞 칸이 있는가"이고, 그건 `bp`의 "앞" 자리에 적힌 값이 `NULL`인지로 판단한다.
+- 문제 3: `PUT(PRED(bp) = free_listp`는 `PUT(자리, 값)`의 쉼표 자리에 `=`를 썼고, 닫는 괄호와 세미콜론이 없다.
+- 문제 4: 고치는 대상이 `bp`의 "앞" 자리다. `bp`는 줄에서 빠지는 칸이라 고칠 필요가 없다. 고쳐야 하는 것은 앞 칸의 "뒤" 자리다.
+- 빠진 것: `remove_free`의 원형이 파일 위쪽에 없다.
+
+#### 시도 3 — 지역 변수와 if/else 틀을 만듦
+```c
+static void remove_free(void *bp)
+{
+    char *prev;
+    char *next;
+
+     if (bp != NULL) {
+        GET_SIZE(PRED(next));
+    }
+    else{
+        PUT(SUCC(insert_free), (unsigned int)bp);
+    }
+}
+```
+- 결과: 컴파일은 됨. 경고 `statement with no effect`(261번째 줄), `unused variable 'prev'`. 함수를 아직 부르지 않아 점수는 그대로(44 util + 24 thru = 68/100).
+- 나아진 점: 지역 변수 `prev`, `next` 선언, `if { } else { }` 틀, `!= NULL` 비교, `PUT(자리, 값)` 문법이 모두 갖춰졌다.
+- 문제 1: `prev`와 `next`를 선언만 하고 값을 넣지 않았다. 값이 없는 변수를 `PRED(next)`에 쓰면 엉뚱한 주소를 읽는다.
+- 문제 2: 조건이 `bp != NULL`이다. `bp`는 빼려는 칸 자신이라 항상 있다. 물어야 하는 것은 앞 칸(`prev`)이 있는가다.
+- 문제 3: `GET_SIZE(PRED(next));`는 읽기만 하고 버린다. 또 `GET_SIZE`는 아래 3비트를 지우는 크기 전용 매크로라 주소를 읽을 때는 `GET`을 쓴다.
+- 문제 4: `SUCC(insert_free)`의 `insert_free`는 함수 이름이다(find_fit 때 `bp = find_fit`과 같은 실수). 칸의 위치가 들어 있는 변수를 넣어야 한다.
+- 문제 5: if와 else의 내용이 서로 바뀐 모양이다. `PUT`으로 이웃 칸을 고치는 것은 앞 칸이 "있을 때"다.
+- 빠진 것: `remove_free`의 원형이 아직 없다.
+
+#### 시도 4 — 안내받은 줄을 변형해 넣음
+```c
+static void remove_free(void *bp)
+{
+    char *prev;
+    char *next;
+
+     if (free_listp != NULL) {
+        next = (char *)PUT(PRED(bp));
+    }
+    else{
+        bp = free_listp;
+    }
+}
+```
+- 결과: 컴파일 에러 (`'PUT' undeclared`, 261번째 줄 — `PUT`에 값 하나만 줌). 실행 파일이 만들어지지 않음.
+- 문제 1: 값을 꺼내는 줄이 `if` 안에 들어갔고, `GET` 대신 `PUT`을 썼다. `PUT`은 쓰기, `GET`은 읽기다. 또 `PRED`(앞)에서 읽은 것을 `next`(뒤)에 담았다.
+- 문제 2: 조건이 `free_listp != NULL`이다. 줄에 칸이 있는지를 묻는 것이고, 빼는 중이라면 항상 참이다. 물어야 하는 것은 `prev != NULL`이다.
+- 문제 3: `bp = free_listp;`는 좌우가 반대다. 바뀌어야 하는 것은 `free_listp`이고, 새 값은 `bp`가 아니라 `next`다.
+- 여기서 답을 안내받음 (아래 시도 5).
+
+#### 시도 5 — 답을 안내받음
+```c
+static void remove_free(void *bp);      /* 원형 */
+
+static void remove_free(void *bp)
+{
+    char *prev = (char *)GET(PRED(bp));
+    char *next = (char *)GET(SUCC(bp));
+
+    if (prev != NULL) {
+        PUT(SUCC(prev), (unsigned int)next);
+    }
+    else {
+        free_listp = next;
+    }
+    if (next != NULL) {
+        PUT(PRED(next), (unsigned int)prev);
+    }
+}
+```
+- 이 함수는 직접 완성하지 못하고 안내받은 코드를 넣었다.
+- 정리: ① 앞/뒤 칸의 위치를 먼저 꺼낸다. ② 앞 칸이 있으면 앞 칸의 "뒤"를 next로, 없으면(bp가 맨 앞) free_listp를 next로. ③ 뒤 칸이 있으면 뒤 칸의 "앞"을 prev로.
+
+#### 시도 6 — 안내받은 코드를 반영
+- 결과: 에러 없음. 경고는 `'insert_free' defined but not used`, `'remove_free' defined but not used` 2개(아직 부르는 곳이 없어서 정상). 11/11 통과, 44 (util) + 33 (thru) = 76/100.
+- 상태: 매크로(PRED, SUCC), 전역 변수(free_listp), insert_free, remove_free까지 준비됨. 동작은 아직 next fit 그대로다.
+
+### 5-5. place와 coalesce에서 넣기/빼기 부르기
+
+구현 전 생각
+- 넣기는 `PUT(FTRP(bp), PACK(csize-asize, 0));` 뒤 → 맞다. 남은 조각의 헤더·풋터가 다 적힌 뒤여야 한다.
+- 빼기는 `bp = NEXT_BLKP(bp);` 이후 → 그 줄 이후의 `bp`는 남은 조각(줄에 들어간 적 없는 칸)이다. 빼야 하는 것은 원래 `bp`이고, else 쪽(통째로 주는 경우)에서도 빠져야 한다.
+
+#### 시도 1 — place 맨 끝에 remove_free
+```c
+static void place(void *bp, size_t asize)
+{
+    size_t csize = GET_SIZE(HDRP(bp));
+
+    if ((csize - asize) >= (2*DSIZE)) {
+        PUT(HDRP(bp), PACK(asize, 0));
+        PUT(FTRP(bp), PACK(asize, 0));
+        bp = NEXT_BLKP(bp);
+
+        PUT(HDRP(bp), PACK(csize-asize, 0));
+        PUT(FTRP(bp), PACK(csize-asize, 0));
+    }
+    else {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
+    remove_free(bp);
+}
+```
+- 결과: 컴파일 에러 없음(경고 `'insert_free' defined but not used`). 실행하면 segmentation fault.
+- 나아진 점: `remove_free(bp)`를 한 번만 써서 if/else 두 갈래를 모두 처리하려 했다.
+- 문제 1: 위치가 맨 끝이다. if 쪽을 지나면 `bp`가 이미 남은 조각으로 바뀌어 있어, 줄에 없는 칸을 빼게 된다.
+- 문제 2: 233~234번째 줄의 `PACK(asize, 1)`이 `PACK(asize, 0)`으로 바뀌었다. 할당한 칸에 "빈칸" 표시를 하게 된다(원래 코드는 1이었다).
+- 문제 3: 남은 조각을 줄에 넣는 `insert_free`가 아직 없다.
+- 참고: 이 단계에서는 place를 다 맞게 고쳐도 강제 종료된다. coalesce가 아직 빈칸을 줄에 넣지 않아서, 줄에 들어간 적 없는 칸을 빼게 되기 때문이다. place와 coalesce를 둘 다 고친 뒤에야 통과한다.
+
+구현 전 생각 (coalesce)
+- 처음 생각: 명시적 리스트니까 coalesce에서 `NEXT_BLKP`, `PREV_BLKP`를 지우면 되나 → 지우지 않는다. 합치기는 창고에서 바로 붙어 있는 칸끼리만 할 수 있어서 옆 칸을 찾는 매크로가 그대로 필요하다. 줄의 앞/뒤(`PRED`, `SUCC`)는 찾기용이다. 기존 줄은 그대로 두고 호출 6줄만 추가한다.
+
+#### 시도 2 — 자리는 모두 맞고, 호출 대신 다른 문장을 씀
+place
+```c
+    size_t csize = GET_SIZE(HDRP(bp));
+    remove_free(bp);
+
+    if ((csize - asize) >= (2*DSIZE)) {
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+
+        PUT(HDRP(bp), PACK(csize-asize, 0));
+        PUT(FTRP(bp), PACK(csize-asize, 0));
+
+        insert_free;
+    }
+```
+coalesce
+```c
+    if (prev_alloc && next_alloc) {            /* Case 1 */
+        bp;
+        return bp;
+    }
+    else if (prev_alloc && !next_alloc) {      /* Case 2 */
+        NEXT_BLKP(bp) = NULL;
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        ...
+    }
+    else if (!prev_alloc && next_alloc) {      /* Case 3 */
+         PREV_BLKP(bp) = NULL;
+        ...
+    }
+    else {                                     /* Case 4 */
+        PREV_BLKP(bp) = NULL;
+        NEXT_BLKP(bp) = NULL;
+        ...
+    }
+    if (find_heap > (char *)bp && find_heap < NEXT_BLKP(bp)) {
+        find_heap = bp;
+    }
+    bp;
+    return bp;
+```
+- 결과: 컴파일 에러 4개 `lvalue required as left operand of assignment` (183, 190, 198, 199번째 줄), 경고 `statement with no effect` (178, 210, 246번째 줄). 실행 파일이 만들어지지 않음.
+- 맞은 점: place의 `remove_free(bp);` 위치(함수 맨 위)와 `PACK(asize, 1)` 복구. coalesce에 추가한 여섯 줄의 **위치**가 전부 맞다(Case 1의 return 앞, Case 2~4의 size 계산 앞, 맨 끝 return 앞).
+- 문제 1: 넣어야 할 자리에 `bp;`, `insert_free;`만 적었다. 함수를 부르려면 `이름(넘길 값);` 모양이어야 한다.
+- 문제 2: 빼야 할 자리에 `NEXT_BLKP(bp) = NULL;`을 적었다. `NEXT_BLKP(bp)`는 계산 결과(위치)이지 값을 넣을 수 있는 상자가 아니라서 `=`의 왼쪽에 올 수 없다. "줄에서 뺀다"는 `NULL`을 넣는 것이 아니라 `remove_free`를 부르는 것이다.
+
+#### 시도 3 — 함수 이름만 적음
+```c
+    if (prev_alloc && next_alloc) {            /* Case 1 */
+        insert_free;
+        return bp;
+    }
+    else if (prev_alloc && !next_alloc) {      /* Case 2 */
+        remove_free;
+        ...
+    }
+    else if (!prev_alloc && next_alloc) {      /* Case 3 */
+        remove_free;
+        ...
+    }
+    else {                                     /* Case 4 */
+        remove_free;
+        remove_free;
+        ...
+    }
+    ...
+    insert_free;
+    return bp;
+```
+(place의 `insert_free;`도 그대로)
+- 결과: 컴파일 에러는 없지만 경고 `statement with no effect`가 7개(178, 183, 190, 198, 199, 211, 247번째 줄). 실행하면 segmentation fault.
+- 나아진 점: 각 자리에 맞는 함수를 골랐다(넣을 곳에 insert_free, 뺄 곳에 remove_free).
+- 문제: 괄호와 넘길 값이 없다. `remove_free;`는 함수를 부르는 것이 아니라 이름만 적은 것이라 아무 일도 하지 않는다. 그래서 줄에 아무것도 들어가지 않고, place의 `remove_free(bp);`가 줄에 없는 칸을 빼려다 죽는다.
+- 들었던 의문: Case 4에서 remove_free를 두 번 쓸 필요가 있나 → 있다. 괄호 안이 비어서 같은 줄처럼 보였을 뿐, 빼야 하는 칸이 둘(앞 칸, 뒤 칸)이라 호출도 두 번이다.
+
+#### 시도 4 — 대부분 호출로 바꿈, 세 줄이 남음
+```c
+178:        insert_free(bp);
+183:        remove_free(NEXT_BLKP(bp));
+190:        remove_free(PREV_BLKP(bp));
+198:        remove_free;(PREV_BLKP(bp))
+199:        remove_free;(NEXT_BLKP(bp))
+211:    insert_free(bp);
+237:    remove_free(bp);            /* place */
+247:        insert_free;            /* place */
+```
+- 결과: 컴파일 에러 `expected ';' before ...` (198, 199번째 줄), 경고 `statement with no effect` (247번째 줄). 실행 파일이 만들어지지 않음.
+- 맞은 점: 178, 183, 190, 211번째 줄은 올바른 호출이 됐다. 198, 199번째 줄도 넘길 칸(앞 칸, 뒤 칸)은 맞게 골랐다.
+- 문제 1: 198, 199번째 줄에서 세미콜론이 이름 바로 뒤에 있다(`remove_free;(...)`). 세미콜론은 문장의 끝이라 `remove_free;`에서 문장이 끝나 버린다. 괄호 뒤로 옮겨야 한다.
+- 문제 2: place의 247번째 줄이 아직 `insert_free;`다.
+
+#### 시도 5 — 완성
+```c
+/* coalesce */
+178:        insert_free(bp);                /* Case 1: return 앞 */
+183:        remove_free(NEXT_BLKP(bp));     /* Case 2 */
+190:        remove_free(PREV_BLKP(bp));     /* Case 3 */
+198:        remove_free(PREV_BLKP(bp));     /* Case 4 */
+199:        remove_free(NEXT_BLKP(bp));     /* Case 4 */
+211:    insert_free(bp);                    /* 맨 끝 return 앞 */
+/* place */
+237:    remove_free(bp);                    /* 함수 맨 위 */
+247:        insert_free(bp);                /* 남은 조각의 헤더·풋터를 쓴 뒤 */
+```
+- 결과: 에러·경고 없음. 11/11 통과, 44 (util) + 18 (thru) = 62/100. short1 80, short2 94.
+- 의미: 빈칸 줄이 실제로 관리되기 시작했다(넣기 3곳, 빼기 5곳). 다만 find_fit은 아직 옛 방식(next fit, 옆 칸으로 건너가기)이라 줄을 쓰지 않는다. 그래서 util은 그대로이고, thru는 줄 관리 비용만 늘어 next fit 때보다 조금 낮게 나올 수 있다(측정 오차도 큼).
+
+### 5-6. find_fit이 빈칸 줄만 따라가게 하기
+
+#### 시도 1 — for 문의 세 칸을 바꿔 봄
+```c
+    for (bp = insert_free; free_listp(bp) > 0; bp = NEXT_BLKP(bp)) {
+        if (GET_SIZE(HDRP(bp)) >= asize) {
+            find_heap = bp;
+            return bp;
+        }
+    }
+    for (bp = heap_listp; bp < find_heap; bp = NEXT_BLKP(bp)) {
+        if (GET_SIZE(HDRP(bp)) >= asize) {
+            find_heap = bp;
+            return bp;
+        }
+    }
+    return NULL;
+```
+- 결과: 컴파일 에러 `called object 'free_listp' is not a function or function pointer`, 경고 `assignment to 'char *' from incompatible pointer type` (219번째 줄). 실행 파일이 만들어지지 않음.
+- 맞은 점: `if`에서 `!GET_ALLOC(HDRP(bp))`를 뺐다. 줄에는 빈칸만 있으니 확인할 필요가 없다.
+- 문제 1 (시작): `bp = insert_free`는 함수 이름을 넣은 것이다(next fit 때 `bp = find_fit`과 같은 실수). 줄의 맨 앞 칸의 위치는 변수 `free_listp`에 있다.
+- 문제 2 (조건): `free_listp(bp) > 0`은 변수를 함수처럼 불렀다. 줄의 끝은 "다음 칸이 없음", 즉 `bp`가 `NULL`이 되는 때다.
+- 문제 3 (이동): `bp = NEXT_BLKP(bp)`는 여전히 옆 칸으로 간다. 줄의 뒤 칸으로 가야 한다.
+- 문제 4: 두 번째 for 문과 `find_heap = bp;`가 남아 있다. next fit용이라 지워야 한다.
+- 들었던 의문: find_heap은 전부 지우는 것인가 → 그렇다. `mm-explicit.c`에서만 지운다(`mm.c`는 next fit 버전으로 남긴다).
+
+#### 시도 2 — 맞는 재료를 다른 칸에 넣음 (find_heap은 Claude가 삭제)
+```c
+static void *find_fit(size_t asize)
+{
+    char *bp;
+
+    for (bp = (char *)GET(SUCC(bp)); free_listp > 0; bp = NEXT_BLKP(bp)) {
+        if (GET_SIZE(HDRP(bp)) >= asize) {
+            return bp;
+        }
+    }
+    return NULL;
+}
+```
+- `find_heap` 관련 줄은 요청에 따라 Claude가 지웠다: 전역 변수 선언, mm_init의 `find_heap = heap_listp;`, coalesce 끝의 `if (find_heap > ...)` 블록, find_fit의 `find_heap = bp;`와 두 번째 for 문 전체. 그 밖의 코드는 손대지 않았다.
+- 결과: 컴파일 에러 없음. 경고 `'bp' is used uninitialized` (213번째 줄). 실행하면 segmentation fault (전체, short1, short2 모두).
+- 나아진 점: 줄의 뒤 칸을 꺼내는 표현 `(char *)GET(SUCC(bp))`와 `free_listp`를 가져왔다. 필요한 재료는 다 나왔다.
+- 문제 1 (시작): `(char *)GET(SUCC(bp))`가 시작 칸에 들어갔다. 이건 "다음으로 이동"에 쓸 표현이다. 시작 시점에는 `bp`에 아직 아무 값도 없어서(경고의 내용) 엉뚱한 주소를 읽는다. 시작은 `free_listp`다.
+- 문제 2 (조건): `free_listp > 0`은 반복 중에 변하지 않는 값을 보고 있다. 한 칸씩 움직이는 것은 `bp`이고, 줄의 끝은 `bp`가 `NULL`이 되는 때다.
+- 문제 3 (이동): `bp = NEXT_BLKP(bp)`는 여전히 옆 칸으로 간다. 시작 칸에 넣은 표현이 여기 와야 한다.
+
+#### 시도 3 — 완성 (for 문 한 줄은 답을 안내받음)
+```c
+static void *find_fit(size_t asize)
+{
+    char *bp;
+
+    for (bp = free_listp; bp != NULL; bp = (char *)GET(SUCC(bp))) {
+        if (GET_SIZE(HDRP(bp)) >= asize) {
+            return bp;
+        }
+    }
+    return NULL;
+}
+```
+- 결과: 에러·경고 없음. 11/11 통과. 세 번 실행: **76, 82, 76 /100** (util 42 + thru 34~40). short1 80, short2 94.
+- for 문의 세 칸: 시작은 줄의 맨 앞(`free_listp`), 조건은 `NULL`이 아닌 동안, 이동은 줄의 뒤 칸(`SUCC`에 적힌 값).
+
+### 세 방식의 find_fit 비교
+
+| 방식 | 시작 | 계속할 조건 | 다음으로 이동 |
+| --- | --- | --- | --- |
+| first fit (implicit) | `heap_listp` | 크기가 0이 아닌 동안 | 옆 칸 `NEXT_BLKP(bp)` |
+| next fit (implicit) | `find_heap` | 크기가 0이 아닌 동안 | 옆 칸 `NEXT_BLKP(bp)` |
+| explicit (LIFO, first fit) | `free_listp` | `NULL`이 아닌 동안 | 줄의 뒤 칸 `(char *)GET(SUCC(bp))` |
+
+### 세 방식의 결과 비교
+
+| 번호 | 트레이스 | first fit util / Kops | next fit util / Kops | explicit util / Kops |
+| --- | --- | --- | --- | --- |
+| 0 | amptjp | 99% / 450 | 91% / 2407 | 89% / 19139 |
+| 1 | cccp | 99% / 731 | 92% / 3344 | 92% / 30666 |
+| 2 | cp-decl | 99% / 445 | 95% / 1560 | 94% / 15844 |
+| 3 | expr | 100% / 535 | 97% / 924 | 96% / 11384 |
+| 4 | coalescing | 66% / 123818 | 66% / 113654 | 66% / 75235 |
+| 5 | random | 92% / 428 | 91% / 791 | 88% / 4262 |
+| 6 | random2 | 92% / 452 | 89% / 890 | 85% / 6286 |
+| 7 | binary | 55% / 44 | 55% / 480 | 55% / 1759 |
+| 8 | binary2 | 51% / 57 | 51% / 1441 | 51% / 3800 |
+| 9 | realloc | 27% / 106 | 27% / 98 | 26% / 72 |
+| 10 | realloc2 | 34% / 4217 | 45% / 3555 | 34% / 2875 |
+| 합계 | | 74% / 125 | 73% / 513 | 71% / 506 |
+
+| | first fit (mm.c 018989f) | next fit (mm.c 9d07c80) | explicit (mm-explicit.c) |
+| --- | --- | --- | --- |
+| util 점수 | 44 | 44 | 42 |
+| thru 점수 | 8 | 30~34 | 34~40 |
+| Perf index | 53 | 74~78 | 76~82 |
+
+- 0~8번 트레이스는 next fit보다 3~8배 빨라졌다(사용 중인 칸을 건너가지 않고 빈칸만 밟는다).
+- 그런데 전체 처리량(506 Kops)은 next fit(513 Kops)과 비슷하다. 전체 0.222초 중 0.200초를 9번(realloc) 트레이스 하나가 쓰기 때문이다. 9번은 72 Kops로 세 방식 모두에서 느리다. 병목이 find_fit이 아니라 mm_realloc(매번 새로 할당하고 복사)에 있다는 뜻이다.
+- util은 73% → 71%로 조금 더 내려갔다. 반납된 칸을 줄의 맨 앞에 넣는(LIFO) 방식이라, 주소 순서와 상관없이 가장 최근에 반납된 칸부터 쓰게 되어 조각이 더 퍼진다.
+
+### 명시적 리스트에서 직접 쓴 것과 안내받은 것
+
+| 부분 | 누가 |
+| --- | --- |
+| 설계(자리, 최소 크기, 넣고 빼는 곳) | 질문에 답하며 정리. 처음 생각이 틀린 곳은 5절 설계 메모에 있음 |
+| `PRED`, `SUCC` 매크로 | 두 번 시도 후 답을 안내받음 |
+| `free_listp` 선언과 초기화 | 직접 작성 |
+| `insert_free` | 코드를 안내받음 |
+| `remove_free` | 네 번 시도 후 코드를 안내받음 |
+| `place`, `coalesce`의 호출 8줄 | 직접 작성 (위치는 처음부터 맞았고, 호출 문법을 세 번 고침) |
+| `find_fit`의 for 문 | 두 번 시도 후 한 줄을 안내받음 |
+| `find_heap` 삭제 | 요청에 따라 Claude가 삭제 |

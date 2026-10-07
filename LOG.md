@@ -153,3 +153,57 @@ make가 에러와 경고 없이 끝났고, 11개 트레이스가 모두 통과�
 | 두 번째 for 문 조건에서 크기와 주소를 비교 (`GET_SIZE(...) < find_heap`) → 무한 반복 | 위치는 위치와 비교한다: `bp < find_heap` |
 | `Payload overlaps another payload`, segmentation fault | coalesce로 합쳐진 칸의 한가운데를 `find_heap`이 가리키고 있었다. 합친 뒤 `find_heap`이 그 칸 안쪽에 있으면 칸의 시작(`bp`)으로 옮긴다 |
 | coalesce의 if 조건에서 부등호 방향이 반대 | 숫자를 넣어 확인했다 (bp=100, find_heap=150, 다음 칸=200) |
+
+### 완성한 함수 (추가)
+- #22 명시적 가용 리스트 (`mm-explicit.c`에 따로 구현. `mm.c`는 implicit + next fit 그대로)
+  - 추가: 매크로 `PRED`, `SUCC`, 전역 변수 `free_listp`, 함수 `insert_free`, `remove_free`
+  - 수정: `mm_init`, `coalesce`, `place`, `find_fit`
+  - 삭제: next fit용 `find_heap`
+  - 방식: 반납된 칸을 줄의 맨 앞에 넣는 LIFO, 찾기는 first fit
+
+### mdriver 결과 (명시적 리스트, mm-explicit.c)
+Makefile은 `mm.c`만 빌드하므로 `mm-explicit.c`는 따로 빌드해서 확인했다. 에러와 경고 없이 빌드됐고 11개 트레이스가 모두 통과했다.
+
+| 번호 | 트레이스 | valid | util | Kops |
+| --- | --- | --- | --- | --- |
+| 0 | amptjp | yes | 89% | 19139 |
+| 1 | cccp | yes | 92% | 30666 |
+| 2 | cp-decl | yes | 94% | 15844 |
+| 3 | expr | yes | 96% | 11384 |
+| 4 | coalescing | yes | 66% | 75235 |
+| 5 | random | yes | 88% | 4262 |
+| 6 | random2 | yes | 85% | 6286 |
+| 7 | binary | yes | 55% | 1759 |
+| 8 | binary2 | yes | 51% | 3800 |
+| 9 | realloc | yes | 26% | 72 |
+| 10 | realloc2 | yes | 34% | 2875 |
+| 합계 | | | 71% | 506 |
+
+- Perf index = 42 (util) + 34 (thru) = 76/100 (세 번 돌린 결과: 76, 82, 76. thru가 34~40점 사이에서 달라진다)
+- short1-bal.rep : 40 (util) + 40 (thru) = 80/100
+- short2-bal.rep : 54 (util) + 40 (thru) = 94/100
+
+### 세 방식 비교
+| | first fit | next fit | explicit |
+| --- | --- | --- | --- |
+| util 점수 | 44 | 44 | 42 |
+| thru 점수 | 8 | 30~34 | 34~40 |
+| Perf index | 53 | 74~78 | 76~82 |
+| 전체 util | 74% | 73% | 71% |
+
+- 0~8번 트레이스는 next fit보다 3~8배 빨라졌다.
+- 전체 처리량은 next fit과 비슷하다(506 vs 513 Kops). 전체 시간의 약 90%를 9번(realloc) 트레이스가 쓰기 때문이다. 병목은 find_fit이 아니라 mm_realloc이다.
+
+### 막혔던 점과 해결 방법 (명시적 리스트)
+시도별 코드와, 직접 쓴 부분/안내받은 부분의 구분은 ATTEMPTS.md 5절에 있다.
+
+| 막혔던 점 | 해결 방법 |
+| --- | --- |
+| 앞/뒤 빈칸을 풋터와 다음 헤더로 찾으려 함 | 그건 바로 옆 칸이다. 다음 빈칸은 멀리 있을 수 있어서, 빈칸의 데이터 영역에 주소를 직접 적는다 |
+| 최소 블록이 24바이트는 되어야 한다고 생각함 | 32비트에서는 주소가 4바이트라 헤더 4 + 앞 4 + 뒤 4 + 풋터 4 = 16으로 그대로다 |
+| pred/succ를 지역 변수로 선언하려 함 | 변수가 아니라 빈칸마다 힙 안에 적혀 있는 값이다. 헤더처럼 매크로(`PRED`, `SUCC`)로 자리를 찾는다 |
+| 자리(`SUCC(bp)`)와 그 자리에 적는 값을 혼동 | 자리는 `SUCC(bp)`, 값 읽기는 `(char *)GET(SUCC(bp))`, 값 쓰기는 `PUT(SUCC(bp), 값)` |
+| place에서 `bp = NEXT_BLKP(bp)` 뒤에 remove_free를 둠 | 그 줄 뒤의 bp는 남은 조각이다. 원래 칸을 빼야 하므로 함수 맨 위에서 뺀다 |
+| coalesce에서 NEXT_BLKP/PREV_BLKP를 지워야 하는지 고민 | 합치기는 옆 칸끼리만 하므로 그대로 둔다. 호출만 추가한다 |
+| `remove_free;`, `NEXT_BLKP(bp) = NULL;`처럼 호출이 아닌 문장을 씀 | 함수는 `이름(넘길 값);`으로 부른다 |
+| place만 고치고 실행해서 segmentation fault | coalesce가 줄에 넣지 않으면 줄에 없는 칸을 빼게 된다. 넣기와 빼기는 함께 맞춰야 한다 |
