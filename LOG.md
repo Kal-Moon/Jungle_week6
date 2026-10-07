@@ -28,3 +28,46 @@
 | `implicit declaration` 경고 | 함수 원형을 사용 위치보다 위에 추가했다 |
 | 저장하지 않고 make를 돌려서 수정 전 결과가 나옴 | make 전에 Ctrl+S로 저장한다 |
 | mm_free 매개변수 이름이 ptr인데 책 코드는 bp | 이름을 맞췄다 |
+
+## 2026-10-07
+
+### 완성한 함수
+- #20 find_fit (first fit 방식)
+- #23 place
+
+### 남은 것
+- #24 realloc (지금 들어 있는 것은 예전 naive 코드)
+
+### mdriver 결과
+make가 에러와 경고 없이 끝났고, 처음으로 mdriver를 실행했다.
+
+`./mdriver -V` : 11개 중 9개 통과, 2개 실패
+
+| 번호 | 트레이스 | valid | util | Kops |
+| --- | --- | --- | --- | --- |
+| 0 | amptjp | yes | 99% | 181 |
+| 1 | cccp | yes | 99% | 149 |
+| 2 | cp-decl | yes | 99% | 167 |
+| 3 | expr | yes | 100% | 201 |
+| 4 | coalescing | yes | 66% | 21214 |
+| 5 | random | yes | 92% | 179 |
+| 6 | random2 | yes | 92% | 205 |
+| 7 | binary | yes | 55% | 24 |
+| 8 | binary2 | yes | 51% | 40 |
+| 9 | realloc | no | - | - |
+| 10 | realloc2 | no | - | - |
+
+- 9, 10번 에러: `mm_realloc did not preserve the data from old block`
+- 실패한 트레이스가 있어서 전체 점수(Perf index)는 아직 나오지 않는다.
+
+짧은 트레이스
+- short1-bal.rep : valid yes, util 66%, 40 (util) + 40 (thru) = 80/100
+- short2-bal.rep : valid yes, util 89%, 54 (util) + 40 (thru) = 94/100
+
+### 막혔던 점과 해결 방법
+| 막혔던 점 | 해결 방법 |
+| --- | --- |
+| find_fit이 블록 크기만 비교해서, 이미 할당된 블록도 고를 수 있었다 | 조건에 `!GET_ALLOC(HDRP(bp))`를 더해 "비어 있고 크기도 충분한" 블록만 고르게 했다 |
+| 고쳤다고 생각했는데 make 결과가 그대로였다 | 에디터에서 저장이 안 된 상태였다. 파일 저장 시각을 확인하고 Ctrl+S 후 다시 make |
+| place가 없어서 `undefined reference to 'place'` 링크 에러 | 원형만 있고 본체가 없었다. place 본체를 작성했다 |
+| find_fit 원형이 두 번 적혀 있었다 | 중복된 한 줄을 지웠다 |
