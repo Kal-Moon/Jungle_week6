@@ -13,8 +13,15 @@
 3. 기록: 커밋할 때마다 LOG.md에 아래 내용을 추가하고 함께 커밋한다.
    - 날짜, 완성한 함수, mdriver 결과(통과한 트레이스, util, 점수)
    - 막혔던 점과 해결 방법 (목요일 발표 자료로 사용)
+4. 비유: 개념을 비유로 설명할 때는 야구나 게임에 빗대어 설명한다.
+   (예: 힙 = 방이 한 줄로 이어진 던전 복도, 빈 블록 = 빈 방, 헤더 = 문 앞 표지판,
+   explicit list = 빈 방끼리 이어진 포탈)
 
 ## 참고
 - 이슈 번호: #14 매크로, #15 mm_init, #16 extend_heap, #17 mm_free,
-  #18 coalesce, #19 mm_malloc, #20 find_fit, #23 place, #24 realloc
+  #18 coalesce, #19 mm_malloc, #20 find_fit(first fit), #21 find_fit(next fit),
+  #23 place, #24 realloc
+- 지금 작업 중인 이슈: #22 explicit free list (find_fit 옵션: explicit 또는 seglist)
+  - explicit list 관련 커밋은 모두 "[#22] 한 일" 형식으로 한다.
+  - 계획과 진행 상황은 ATTEMPTS.md의 6번 섹션에 있다.
 - 빌드는 -m32 (32비트), WSIZE 4
