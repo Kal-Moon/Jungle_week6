@@ -819,6 +819,122 @@ static void *find_fit(size_t asize)
 - 그런데 전체 처리량(506 Kops)은 next fit(513 Kops)과 비슷하다. 전체 0.222초 중 0.200초를 9번(realloc) 트레이스 하나가 쓰기 때문이다. 9번은 72 Kops로 세 방식 모두에서 느리다. 병목이 find_fit이 아니라 mm_realloc(매번 새로 할당하고 복사)에 있다는 뜻이다.
 - util은 73% → 71%로 조금 더 내려갔다. 반납된 칸을 줄의 맨 앞에 넣는(LIFO) 방식이라, 주소 순서와 상관없이 가장 최근에 반납된 칸부터 쓰게 되어 조각이 더 퍼진다.
 
+### 5-7. find_fit을 best fit으로 바꿔 보기 (2026-10-08, 로컬 실험 — 커밋 안 함)
+
+"명시적 리스트가 best fit이 아니었나?"를 확인하다가, 지금 코드가 first fit임을 알고 best fit으로 바꿔 비교했다.
+시간이 없어 `find_fit`은 요청에 따라 Claude가 작성했다. GitHub의 `mm-explicit.c`(368ae61)는 first fit 그대로다.
+
+#### 시도 1 — 끝까지 돌며 가장 작은 칸을 기억 (Claude 작성)
+```c
+static void *find_fit(size_t asize)
+{
+    char *bp;
+    char *best = NULL;
+    size_t best_size = 0;
+
+    for (bp = free_listp; bp != NULL; bp = (char *)GET(SUCC(bp))) {
+        size_t size = GET_SIZE(HDRP(bp));
+
+        if (size < asize)
+            continue;
+        if (size == asize)
+            return bp;
+        if (best == NULL || size < best_size) {
+            best = bp;
+            best_size = size;
+        }
+    }
+    return best;
+}
+```
+- 결과: 에러·경고 없음. 11/11 통과. 한 번 실행: **63/100** (util 45 + thru 18). short1 util 66%, short2 util 89%.
+- first fit과 다른 점: 맞는 칸을 만나도 바로 돌려주지 않고 `best`에 기억한 뒤 계속 돈다. 크기가 정확히 같을 때만 바로 돌려준다.
+
+| 번호 | 트레이스 | explicit first fit util / Kops | explicit best fit util / Kops |
+| --- | --- | --- | --- |
+| 0 | amptjp | 89% / 19139 | 99% / 32025 |
+| 1 | cccp | 92% / 30666 | 99% / 28922 |
+| 2 | cp-decl | 94% / 15844 | 99% / 21648 |
+| 3 | expr | 96% / 11384 | 100% / 18324 |
+| 4 | coalescing | 66% / 75235 | 66% / 92249 |
+| 5 | random | 88% / 4262 | 96% / 1198 |
+| 6 | random2 | 85% / 6286 | 95% / 1322 |
+| 7 | binary | 55% / 1759 | 55% / 319 |
+| 8 | binary2 | 51% / 3800 | 51% / 139 |
+| 9 | realloc | 26% / 72 | 31% / 73 |
+| 10 | realloc2 | 34% / 2875 | 30% / 3048 |
+| 합계 | | 71% / 506 | 75% / 267 |
+
+| | explicit first fit (368ae61) | explicit best fit (로컬) |
+| --- | --- | --- |
+| util 점수 | 42 | 45 |
+| thru 점수 | 34~40 | 18 |
+| Perf index | 76~82 | 63 |
+
+왜 점수가 내려갔나
+- 얻은 것은 util 3점, 잃은 것은 thru 16~22점이다. 평균 util이 71% → 75%로 4%p 올랐는데, util 점수는 60점 × 평균 util이라 4%p는 약 3점에 그친다.
+- 전체 시간이 0.222초 → 0.421초로 늘었다. 늘어난 0.2초가 거의 전부 7번(0.007초 → 0.038초)과 8번(0.006초 → 0.172초)이다.
+- binary 트레이스는 작은 칸과 큰 칸을 번갈아 받은 뒤 한쪽만 반납해서, 합쳐지지 못한 빈칸이 줄에 수천 개 쌓인다. first fit은 맞는 칸을 만나면 멈추지만, best fit은 요청마다 그 줄을 끝까지 다 본다.
+- 그런데 7번, 8번의 util은 55%, 51%로 그대로다. 이 트레이스의 낭비는 "어느 칸을 고르느냐"가 아니라 빈칸 사이에 사용 중인 칸이 끼어 합쳐지지 못하는 데서 오기 때문이다. 가장 느려진 곳에서 얻은 것이 없다.
+- 정리: best fit은 util을 올리지만, 줄이 하나뿐이면 찾는 비용이 "빈칸 개수"만큼 든다. best fit이 손해 없이 쓰이려면 찾을 범위가 좁아야 한다(크기별로 줄을 나누는 segregated list).
+
+### 5-8. 명시적 리스트에 next fit을 붙이면? (2026-10-08, 실험 — 프로젝트 파일에는 없음)
+
+"명시적 리스트에 next fit으로 하면 어떻게 되나?"를 확인하려고 Claude가 `mm-explicit.c`의 복사본을 임시 폴더에 만들어 측정했다.
+`mm-explicit.c` 자체에는 반영하지 않았다. 비교를 위해 커밋된 first fit(368ae61)도 같은 시점에 다시 돌렸다.
+
+#### 시도 1 — 줄 안에서 "지난번에 멈춘 칸"을 기억 (Claude 작성)
+```c
+static char *rover;              /* 지난번에 멈춘 빈칸. mm_init에서 NULL로 초기화 */
+
+static void *find_fit(size_t asize)
+{
+    char *bp;
+    for (bp = rover; bp != NULL; bp = (char *)GET(SUCC(bp)))
+        if (GET_SIZE(HDRP(bp)) >= asize) { rover = bp; return bp; }
+    for (bp = free_listp; bp != rover; bp = (char *)GET(SUCC(bp)))
+        if (GET_SIZE(HDRP(bp)) >= asize) { rover = bp; return bp; }
+    return NULL;
+}
+
+/* remove_free 맨 앞에 추가: 기억한 칸이 줄에서 빠지면 그 뒤 칸으로 옮긴다 */
+    if (rover == (char *)bp) rover = (char *)GET(SUCC(bp));
+```
+- 결과: 에러·경고 없음. 11/11 통과. 세 번 실행: **59, 59, 61 /100** (util 43 + thru 16~18).
+- 같은 시점의 first fit: 71, 72, 77 /100 (util 42 + thru 29~34). 어제 기록(76~82)보다 조금 낮게 나왔다.
+- implicit의 next fit(4절)과 구조는 같다: 기억한 자리부터 끝까지, 없으면 맨 앞부터 기억한 자리까지.
+
+| 번호 | 트레이스 | explicit first fit util / Kops | explicit next fit util / Kops |
+| --- | --- | --- | --- |
+| 0 | amptjp | 89% / 7604~15764 | 94% / 20184~22550 |
+| 1 | cccp | 92% / 19061~30175 | 93% / 29685~35208 |
+| 2 | cp-decl | 94% / 9045~12506 | 95% / 19021~24087 |
+| 3 | expr | 96% / 9313~12055 | 97% / 15215~25128 |
+| 4 | coalescing | 66% / 53691~60555 | 66% / 46139~62718 |
+| 5 | random | 88% / 2663~5861 | 90% / 3636~4483 |
+| 6 | random2 | 85% / 4213~5130 | 88% / 3562~4169 |
+| 7 | binary | 55% / 1189~1591 | 55% / 215~249 |
+| 8 | binary2 | 51% / 3469~4246 | 51% / 124~159 |
+| 9 | realloc | 26% / 61~74 | 25% / 57~69 |
+| 10 | realloc2 | 34% / 2726~3350 | 34% / 3002~3268 |
+| 합계 | | 71% / 432~513 | 72% / 236~266 |
+
+명시적 리스트에서 세 가지 찾기 방식 비교
+
+| | first fit (368ae61) | next fit (실험) | best fit (5-7, 로컬) |
+| --- | --- | --- | --- |
+| util 점수 | 42 | 43 | 45 |
+| thru 점수 | 29~40 | 16~18 | 18 |
+| Perf index | 71~82 | 59~61 | 63 |
+
+왜 느려졌나
+- implicit에서는 칸이 주소 순서라, 쪼개고 남은 빈칸이 "지난번에 멈춘 자리 바로 뒤"에 있었다. 그래서 next fit이 바로 맞는 칸을 찾았다.
+- LIFO 명시적 리스트에서는 쪼개고 남은 빈칸이 줄의 맨 앞에 들어간다. 기억한 자리는 이미 줄의 중간으로 넘어가 있어서, 가장 쓸 만한 칸이 항상 등 뒤에 있다.
+- 그래서 기억한 자리부터 줄 끝까지 다 보고, 맨 앞으로 돌아와서야 그 칸을 찾는다. 맞지 않는 빈칸이 수천 개 쌓이는 binary(7번, 8번)에서는 요청마다 줄을 거의 한 바퀴 돈다.
+- LIFO에서 맨 앞부터 찾는 first fit은 "가장 최근에 생긴 빈칸부터 본다"는 뜻이라, next fit이 하려던 일을 이미 하고 있다.
+- 정리: 측정한 세 방식 중 LIFO + first fit이 가장 높다. 찾기 방식의 좋고 나쁨은 리스트를 어떤 순서로 세우느냐에 따라 달라진다.
+- 한계: 기억한 칸이 빠질 때 "그 뒤 칸으로 옮기는" 방식 하나만 실험했다.
+
 ### 명시적 리스트에서 직접 쓴 것과 안내받은 것
 
 | 부분 | 누가 |
@@ -831,3 +947,5 @@ static void *find_fit(size_t asize)
 | `place`, `coalesce`의 호출 8줄 | 직접 작성 (위치는 처음부터 맞았고, 호출 문법을 세 번 고침) |
 | `find_fit`의 for 문 | 두 번 시도 후 한 줄을 안내받음 |
 | `find_heap` 삭제 | 요청에 따라 Claude가 삭제 |
+| `find_fit`의 best fit 버전 (5-7, 로컬 실험) | 요청에 따라 Claude가 작성 |
+| 명시적 리스트의 next fit 실험 (5-8, 프로젝트 파일에는 없음) | Claude가 복사본에서 작성·측정 |
