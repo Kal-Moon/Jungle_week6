@@ -1,19 +1,19 @@
 ---
 title: "6주차 WIL - Malloc Lab"
 aliases:
-  - 6주차 WIL
-  - Week6 WIL
-  - Malloc Lab WIL
+    - 6주차 WIL
+    - Week6 WIL
+    - Malloc Lab WIL
 date: 2026-10-08
 period: 2026-10-01 ~ 2026-10-08
 week: 6
 tags:
-  - jungle
-  - WIL
-  - malloc-lab
-  - csapp
-  - c-language
-  - memory
+    - jungle
+    - WIL
+    - malloc-lab
+    - csapp
+    - c-language
+    - memory
 status: done
 final_score: 76~82
 repo: kal-moon/jungle_week6
@@ -85,15 +85,17 @@ repo: kal-moon/jungle_week6
 ### 1-3. 블록 구조와 경계 태그 #concept
 
 ```
-          bp-4      bp                                 bp+size-8
-           ┌─────────┬──────────────────────────────────┬─────────┐
- 할당 블록 │ header  │ payload (+ 정렬 패딩)            │ footer  │
-           │ size | a│                                  │ size | a│
-           └─────────┴──────────────────────────────────┴─────────┘
+bp-4      bp                             bp+size-8
+|         |                              |
+v         v                              v
++---------+------------------------------+---------+
+| header  | payload (+ padding)          | footer  |
+| size|a  |                              | size|a  |
++---------+------------------------------+---------+
 ```
 
 - **헤더** = 크기 + 할당 비트. 크기가 8의 배수라 아래 3비트가 늘 0 → 그 자리에 할당 여부.
-  - `GET_SIZE` = `& ~0x7`, `GET_ALLOC` = `& 0x1`
+    - `GET_SIZE` = `& ~0x7`, `GET_ALLOC` = `& 0x1`
 - **풋터** = 헤더 복사본. **경계 태그(boundary tag)**. 앞 블록 크기를 바로 알 수 있어서 앞 칸과 합치기가 상수 시간.
 - `bp`는 헤더가 아니라 **payload 시작**. 사용자에게 돌려주는 주소.
 
@@ -107,11 +109,12 @@ repo: kal-moon/jungle_week6
 ### 1-4. 프롤로그와 에필로그 #concept
 
 ```
- ┌────────┬───────────┬───────────┬───────────┐
- │ 패딩 0 │ 8/1 헤더  │ 8/1 풋터  │ 0/1 헤더  │
- └────────┴───────────┴───────────┴───────────┘
-  정렬용    └─ 프롤로그 블록 ─┘      에필로그
-                      ↑ heap_listp
++---------+-----------+-----------+-----------+
+| pad 0   | 8/1 hdr   | 8/1 ftr   | 0/1 hdr   |
++---------+-----------+-----------+-----------+
+  padding |<------ prologue ----->| epilogue
+                      ^
+                      heap_listp
 ```
 
 - 힙 양 끝에 "항상 할당된 가짜 블록"을 세워 두면 coalesce에서 경계 처리가 필요 없다.
@@ -170,11 +173,12 @@ flowchart TD
 explicit 빈칸 모양:
 
 ```
- ┌────────┬──────────┬──────────┬────────┬────────┐
- │ header │ PRED     │ SUCC     │  ...   │ footer │
- │ size|0 │ 앞 빈칸  │ 뒤 빈칸  │        │ size|0 │
- └────────┴──────────┴──────────┴────────┴────────┘
-          ↑ bp       ↑ bp+4
++--------+-----------+-----------+-------+--------+
+| header | PRED      | SUCC      |  ...  | footer |
+| size|0 | prev free | next free |       | size|0 |
++--------+-----------+-----------+-------+--------+
+         ^           ^
+         bp          bp+4
 ```
 
 ```mermaid
